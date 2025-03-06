@@ -22,24 +22,48 @@
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
 
-        async function listarRegistros() {
-            const registrosRef = collection(db, "registrations");
-            const snapshot = await getDocs(registrosRef);
-            const tableBody = document.getElementById("table-body");
-            tableBody.innerHTML = "";
+        const colection_forms='forms';
+        const colection_registrations='registrations';
+        async function cargarFormularios() {
+            const formSelect = document.getElementById("form-select");
+            const snapshot = await getDocs(collection(db, colection_forms));
+            formSelect.innerHTML = '<option value="">Todos los formularios</option>';
 
             snapshot.forEach(doc => {
                 const data = doc.data();
-                const row = `<tr>
-                    <td>${data.email}</td>
-                    <td>${data.timestamp}</td>
-                    <td>${data.attempts}</td>
-                </tr>`;
-                tableBody.innerHTML += row;
+                const option = document.createElement("option");
+                option.value = doc.id;
+                option.textContent = data.title;
+                formSelect.appendChild(option);
             });
         }
 
-        window.onload = listarRegistros;
+        async function listarRegistros() {
+            const registrosRef = collection(db, colection_registrations);
+            const snapshot = await getDocs(registrosRef);
+            const tableBody = document.getElementById("table-body");
+            tableBody.innerHTML = "";
+            const filtro = document.getElementById("form-select").value;
+
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                if (!filtro || data.form_id === filtro) {
+                    const row = `<tr>
+                        <td>${data.email}</td>
+                        <td>${data.timestamp}</td>
+                        <td>${data.attempts}</td>
+                        <td>${data.form_title}</td>
+                    </tr>`;
+                    tableBody.innerHTML += row;
+                }
+            });
+        }
+
+        window.onload = async () => {
+            await cargarFormularios();
+            listarRegistros();
+            document.getElementById("form-select").addEventListener("change", listarRegistros);
+        };
     </script>
     <style>
         body {
@@ -54,8 +78,7 @@
             margin-top: 20px;
         }
 
-        th,
-        td {
+        th, td {
             border: 1px solid #ddd;
             padding: 8px;
         }
@@ -64,17 +87,26 @@
             background-color: #3b82f6;
             color: white;
         }
+
+        select {
+            padding: 8px;
+            margin-top: 10px;
+            font-size: 16px;
+        }
     </style>
 </head>
 
 <body>
-    <h1>Lista de Registros de postulantes del Formulario1</h1>
+    <h1>Lista de Registros de Postulantes</h1>
+    <label for="form-select">Filtrar por formulario:</label>
+    <select id="form-select"></select>
     <table>
         <thead>
             <tr>
                 <th>Email</th>
                 <th>Fecha de Ingreso</th>
                 <th>Intentos</th>
+                <th>Formulario Postulado</th>
             </tr>
         </thead>
         <tbody id="table-body"></tbody>
