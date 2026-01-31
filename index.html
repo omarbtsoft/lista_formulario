@@ -9,7 +9,7 @@
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, collection, getDocs, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyAKHM9fOK5L4LQCHL1fghdcaqo-kxC52Sg",
@@ -29,6 +29,26 @@
 
         // Variable para almacenar datos filtrados
         let datosFiltrados = [];
+
+        // Flag para habilitar/deshabilitar eliminación (se carga desde DB)
+        let eliminarHabilitado = false;
+
+        // Cargar configuración desde Firestore
+        async function cargarConfiguracion() {
+            try {
+                const configRef = collection(db, 'config');
+                const snapshot = await getDocs(configRef);
+                snapshot.forEach(documento => {
+                    const data = documento.data();
+                    if (data.eliminar_habilitado !== undefined) {
+                        eliminarHabilitado = data.eliminar_habilitado;
+                    }
+                });
+            } catch (error) {
+                console.error('Error al cargar configuración:', error);
+                eliminarHabilitado = false;
+            }
+        }
 
         async function cargarFormularios() {
             const formSelect = document.getElementById("form-select");
@@ -52,8 +72,12 @@
             const filtro = document.getElementById("form-select").value;
             datosFiltrados = []; // Limpiar datos filtrados
 
-            snapshot.forEach(doc => {
-                const data = doc.data();
+            // Mostrar u ocultar columna de acciones según el flag
+            const thAcciones = document.getElementById("th-acciones");
+            thAcciones.style.display = eliminarHabilitado ? '' : 'none';
+
+            snapshot.forEach(documento => {
+                const data = documento.data();
                 if (!filtro || data.form_id === filtro) {
                     // Guardar datos filtrados para exportación
                     datosFiltrados.push({
@@ -62,11 +86,15 @@
                         attempts: data.attempts,
                         form_title: data.form_title
                     });
+                    const botonEliminar = eliminarHabilitado
+                        ? `<td><button class="btn-eliminar" onclick="eliminarRegistro('${documento.id}')">Eliminar</button></td>`
+                        : '';
                     const row = `<tr>
                         <td>${data.email}</td>
                         <td>${data.timestamp}</td>
                         <td>${data.attempts}</td>
                         <td>${data.form_title}</td>
+                        ${botonEliminar}
                     </tr>`;
                     tableBody.innerHTML += row;
                 }
@@ -110,11 +138,25 @@
             XLSX.writeFile(wb, 'registros_filtrados.xlsx');
         }
 
+        // Función para eliminar registro
+        async function eliminarRegistro(id) {
+            if (confirm('¿Está seguro de que desea eliminar este registro?')) {
+                try {
+                    await deleteDoc(doc(db, colection_registrations, id));
+                    listarRegistros(); // Recargar la tabla
+                } catch (error) {
+                    alert('Error al eliminar el registro: ' + error.message);
+                }
+            }
+        }
+
         // Exponer funciones globalmente
         window.descargarTXT = descargarTXT;
         window.descargarXLSX = descargarXLSX;
+        window.eliminarRegistro = eliminarRegistro;
 
         window.onload = async () => {
+            await cargarConfiguracion(); // Cargar flag desde DB primero
             await cargarFormularios();
             listarRegistros();
             document.getElementById("form-select").addEventListener("change", listarRegistros);
@@ -181,6 +223,21 @@
         .btn-xlsx:hover {
             background-color: #059669;
         }
+
+        .btn-eliminar {
+            padding: 6px 12px;
+            background-color: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background-color 0.3s;
+        }
+
+        .btn-eliminar:hover {
+            background-color: #dc2626;
+        }
     </style>
 </head>
 
@@ -200,6 +257,7 @@
                 <th>Fecha de Ingreso</th>
                 <th>Intentos</th>
                 <th>Formulario Postulado</th>
+                <th id="th-acciones">Acciones</th>
             </tr>
         </thead>
         <tbody id="table-body"></tbody>
