@@ -5,6 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lista de Registros</title>
+    <!-- Librería SheetJS para exportar a Excel -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
         import { getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
@@ -24,6 +26,10 @@
 
         const colection_forms='forms';
         const colection_registrations='registrations';
+
+        // Variable para almacenar datos filtrados
+        let datosFiltrados = [];
+
         async function cargarFormularios() {
             const formSelect = document.getElementById("form-select");
             const snapshot = await getDocs(collection(db, colection_forms));
@@ -44,10 +50,18 @@
             const tableBody = document.getElementById("table-body");
             tableBody.innerHTML = "";
             const filtro = document.getElementById("form-select").value;
+            datosFiltrados = []; // Limpiar datos filtrados
 
             snapshot.forEach(doc => {
                 const data = doc.data();
                 if (!filtro || data.form_id === filtro) {
+                    // Guardar datos filtrados para exportación
+                    datosFiltrados.push({
+                        email: data.email,
+                        timestamp: data.timestamp,
+                        attempts: data.attempts,
+                        form_title: data.form_title
+                    });
                     const row = `<tr>
                         <td>${data.email}</td>
                         <td>${data.timestamp}</td>
@@ -58,6 +72,47 @@
                 }
             });
         }
+
+        // Función para descargar como TXT
+        function descargarTXT() {
+            if (datosFiltrados.length === 0) {
+                alert('No hay datos para descargar');
+                return;
+            }
+            let contenido = 'Email\tFecha de Ingreso\tIntentos\tFormulario Postulado\n';
+            datosFiltrados.forEach(d => {
+                contenido += `${d.email}\t${d.timestamp}\t${d.attempts}\t${d.form_title}\n`;
+            });
+            const blob = new Blob([contenido], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'registros_filtrados.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Función para descargar como XLSX
+        function descargarXLSX() {
+            if (datosFiltrados.length === 0) {
+                alert('No hay datos para descargar');
+                return;
+            }
+            const datosExcel = datosFiltrados.map(d => ({
+                'Email': d.email,
+                'Fecha de Ingreso': d.timestamp,
+                'Intentos': d.attempts,
+                'Formulario Postulado': d.form_title
+            }));
+            const ws = XLSX.utils.json_to_sheet(datosExcel);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, 'Registros');
+            XLSX.writeFile(wb, 'registros_filtrados.xlsx');
+        }
+
+        // Exponer funciones globalmente
+        window.descargarTXT = descargarTXT;
+        window.descargarXLSX = descargarXLSX;
 
         window.onload = async () => {
             await cargarFormularios();
@@ -93,6 +148,39 @@
             margin-top: 10px;
             font-size: 16px;
         }
+
+        .botones-descarga {
+            margin-top: 15px;
+            margin-bottom: 10px;
+        }
+
+        .btn-descarga {
+            padding: 10px 20px;
+            margin: 0 5px;
+            font-size: 14px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .btn-txt {
+            background-color: #6b7280;
+            color: white;
+        }
+
+        .btn-txt:hover {
+            background-color: #4b5563;
+        }
+
+        .btn-xlsx {
+            background-color: #10b981;
+            color: white;
+        }
+
+        .btn-xlsx:hover {
+            background-color: #059669;
+        }
     </style>
 </head>
 
@@ -100,6 +188,11 @@
     <h1>Lista de Registros de Postulantes</h1>
     <label for="form-select">Filtrar por formulario:</label>
     <select id="form-select"></select>
+
+    <div class="botones-descarga">
+        <button onclick="descargarTXT()" class="btn-descarga btn-txt">Descargar TXT</button>
+        <button onclick="descargarXLSX()" class="btn-descarga btn-xlsx">Descargar Excel</button>
+    </div>
     <table>
         <thead>
             <tr>
