@@ -9,7 +9,7 @@
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, collection, getDocs, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, collection, getDocs, doc, deleteDoc, updateDoc, query, where } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyAKHM9fOK5L4LQCHL1fghdcaqo-kxC52Sg",
@@ -24,20 +24,87 @@
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
 
-        const colection_forms='forms';
-        const colection_registrations='registrations';
+        const colection_forms = 'forms';
+        const colection_registrations = 'registrations';
 
-        // Variable para almacenar datos filtrados
-        let datosFiltrados = [];
+        // Definición de estados de revisión
+        const ESTADOS = {
+            pendiente: { label: 'Pendiente', clase: 'badge-pendiente' },
+            revisado: { label: 'Revisado', clase: 'badge-revisado' },
+            aceptado: { label: 'Aceptado', clase: 'badge-aceptado' },
+            rechazado: { label: 'Rechazado', clase: 'badge-rechazado' }
+        };
+        const ESTADO_DEFECTO = 'pendiente';
 
-        // Flag para habilitar/deshabilitar eliminación (se carga desde DB)
+        // --- Estado de la aplicación ---
+        let registrosActuales = [];   // Conjunto cargado desde Firestore (ya filtrado por formulario en servidor)
+        let vistaActual = [];         // Registros tras aplicar búsqueda/estado/orden (lo que se exporta y pagina)
         let eliminarHabilitado = false;
+        let sortColumn = 'timestamp';
+        let sortDir = 'desc';
+        let paginaActual = 1;
+        const TAM_PAGINA = 25;
 
-        // Cargar configuración desde Firestore
+        // --- Helpers ---
+        function escapeHtml(valor) {
+            if (valor === null || valor === undefined) return '';
+            return String(valor)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function normalizarEstado(valor) {
+            return ESTADOS[valor] ? valor : ESTADO_DEFECTO;
+        }
+
+        // Convierte el timestamp (texto u objeto Firestore) a Date para ordenar
+        function aFecha(timestamp) {
+            if (!timestamp) return new Date(0);
+            // Objeto Timestamp de Firestore
+            if (typeof timestamp.toDate === 'function') return timestamp.toDate();
+            if (typeof timestamp.seconds === 'number') return new Date(timestamp.seconds * 1000);
+            // Número (epoch en ms o s)
+            if (typeof timestamp === 'number') {
+                return new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
+            }
+            const texto = String(timestamp).trim();
+            // Formato dd/mm/aaaa [hh:mm[:ss]] (new Date lo interpretaría como mm/dd)
+            const m = texto.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+            if (m) {
+                const [, dd, mm, aaaa, hh = '0', min = '0', ss = '0'] = m;
+                return new Date(+aaaa, +mm - 1, +dd, +hh, +min, +ss);
+            }
+            // ISO u otros formatos que Date entiende de forma fiable
+            const d = new Date(texto);
+            return isNaN(d.getTime()) ? new Date(0) : d;
+        }
+
+        function formatFecha(timestamp) {
+            const d = aFecha(timestamp);
+            if (d.getTime() === 0) return escapeHtml(timestamp ?? '');
+            const dd = String(d.getDate()).padStart(2, '0');
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const aaaa = d.getFullYear();
+            const hh = String(d.getHours()).padStart(2, '0');
+            const min = String(d.getMinutes()).padStart(2, '0');
+            return `${dd}/${mm}/${aaaa} ${hh}:${min}`;
+        }
+
+        function debounce(fn, ms) {
+            let t;
+            return (...args) => {
+                clearTimeout(t);
+                t = setTimeout(() => fn(...args), ms);
+            };
+        }
+
+        // --- Carga de configuración y formularios ---
         async function cargarConfiguracion() {
             try {
-                const configRef = collection(db, 'config');
-                const snapshot = await getDocs(configRef);
+                const snapshot = await getDocs(collection(db, 'config'));
                 snapshot.forEach(documento => {
                     const data = documento.data();
                     if (data.eliminar_habilitado !== undefined) {
@@ -54,62 +121,186 @@
             const formSelect = document.getElementById("form-select");
             const snapshot = await getDocs(collection(db, colection_forms));
             formSelect.innerHTML = '<option value="">Todos los formularios</option>';
-
-            snapshot.forEach(doc => {
-                const data = doc.data();
+            snapshot.forEach(d => {
+                const data = d.data();
                 const option = document.createElement("option");
-                option.value = doc.id;
+                option.value = d.id;
                 option.textContent = data.title;
                 formSelect.appendChild(option);
             });
         }
 
-        async function listarRegistros() {
-            const registrosRef = collection(db, colection_registrations);
-            const snapshot = await getDocs(registrosRef);
-            const tableBody = document.getElementById("table-body");
-            tableBody.innerHTML = "";
-            const filtro = document.getElementById("form-select").value;
-            datosFiltrados = []; // Limpiar datos filtrados
-
-            // Mostrar u ocultar columna de acciones según el flag
-            const thAcciones = document.getElementById("th-acciones");
-            thAcciones.style.display = eliminarHabilitado ? '' : 'none';
-
-            snapshot.forEach(documento => {
-                const data = documento.data();
-                if (!filtro || data.form_id === filtro) {
-                    // Guardar datos filtrados para exportación
-                    datosFiltrados.push({
-                        email: data.email,
-                        timestamp: data.timestamp,
-                        attempts: data.attempts,
-                        form_title: data.form_title
+        // --- Carga de registros (consulta a Firestore optimizada) ---
+        async function cargarRegistros() {
+            const filtroForm = document.getElementById("form-select").value;
+            mostrarCargando(true);
+            try {
+                const ref = collection(db, colection_registrations);
+                // Filtro por formulario en el servidor (igualdad: no requiere índice compuesto)
+                const consulta = filtroForm
+                    ? query(ref, where('form_id', '==', filtroForm))
+                    : ref;
+                const snapshot = await getDocs(consulta);
+                registrosActuales = [];
+                snapshot.forEach(documento => {
+                    const data = documento.data();
+                    registrosActuales.push({
+                        id: documento.id,
+                        email: data.email ?? '',
+                        timestamp: data.timestamp ?? '',
+                        attempts: data.attempts ?? '',
+                        form_title: data.form_title ?? '',
+                        form_id: data.form_id ?? '',
+                        review_status: normalizarEstado(data.review_status)
                     });
-                    const botonEliminar = eliminarHabilitado
-                        ? `<td><button class="btn-eliminar" onclick="eliminarRegistro('${documento.id}')">Eliminar</button></td>`
+                });
+                paginaActual = 1;
+                aplicarVista();
+            } catch (error) {
+                console.error('Error al cargar registros:', error);
+                alert('Error al cargar los registros: ' + error.message);
+            } finally {
+                mostrarCargando(false);
+            }
+        }
+
+        // --- Aplica búsqueda + filtro de estado + orden, luego renderiza ---
+        function aplicarVista() {
+            const busqueda = document.getElementById("buscar").value.trim().toLowerCase();
+            const filtroEstado = document.getElementById("estado-select").value;
+
+            vistaActual = registrosActuales.filter(r => {
+                const coincideBusqueda = !busqueda || r.email.toLowerCase().includes(busqueda);
+                const coincideEstado = !filtroEstado || r.review_status === filtroEstado;
+                return coincideBusqueda && coincideEstado;
+            });
+
+            ordenarVista();
+            renderTabla();
+        }
+
+        function ordenarVista() {
+            const dir = sortDir === 'asc' ? 1 : -1;
+            vistaActual.sort((a, b) => {
+                let va, vb;
+                if (sortColumn === 'timestamp') {
+                    va = aFecha(a.timestamp).getTime();
+                    vb = aFecha(b.timestamp).getTime();
+                } else if (sortColumn === 'attempts') {
+                    va = Number(a.attempts) || 0;
+                    vb = Number(b.attempts) || 0;
+                } else {
+                    va = String(a[sortColumn] ?? '').toLowerCase();
+                    vb = String(b[sortColumn] ?? '').toLowerCase();
+                }
+                if (va < vb) return -1 * dir;
+                if (va > vb) return 1 * dir;
+                return 0;
+            });
+        }
+
+        // --- Render de la tabla y la paginación ---
+        function renderTabla() {
+            const tbody = document.getElementById("table-body");
+            tbody.innerHTML = "";
+
+            // Mostrar/ocultar columna de acciones según el flag
+            document.getElementById("th-acciones").style.display = eliminarHabilitado ? '' : 'none';
+
+            // Contador
+            document.getElementById("contador").textContent =
+                `${vistaActual.length} postulante${vistaActual.length === 1 ? '' : 's'}`;
+
+            // Paginación
+            const totalPaginas = Math.max(1, Math.ceil(vistaActual.length / TAM_PAGINA));
+            if (paginaActual > totalPaginas) paginaActual = totalPaginas;
+            const inicio = (paginaActual - 1) * TAM_PAGINA;
+            const pagina = vistaActual.slice(inicio, inicio + TAM_PAGINA);
+
+            if (pagina.length === 0) {
+                const colspan = eliminarHabilitado ? 5 : 4;
+                tbody.innerHTML = `<tr><td colspan="${colspan}" class="sin-datos">No hay registros que coincidan.</td></tr>`;
+            } else {
+                const opciones = Object.keys(ESTADOS).map(k =>
+                    `<option value="${k}">${ESTADOS[k].label}</option>`).join('');
+
+                pagina.forEach(r => {
+                    const estado = ESTADOS[r.review_status];
+                    const tr = document.createElement('tr');
+                    const acciones = eliminarHabilitado
+                        ? `<td><button class="btn-eliminar" data-id="${escapeHtml(r.id)}">Eliminar</button></td>`
                         : '';
-                    const row = `<tr>
-                        <td>${data.email}</td>
-                        <td>${data.timestamp}</td>
-                        <td>${data.attempts}</td>
-                        <td>${data.form_title}</td>
-                        ${botonEliminar}
-                    </tr>`;
-                    tableBody.innerHTML += row;
+                    tr.innerHTML = `
+                        <td data-label="Email">${escapeHtml(r.email)}</td>
+                        <td data-label="Fecha de Ingreso">${formatFecha(r.timestamp)}</td>
+                        <td data-label="Intentos">${escapeHtml(r.attempts)}</td>
+                        <td data-label="Formulario">${escapeHtml(r.form_title)}</td>
+                        <td data-label="Estado">
+                            <span class="badge ${estado.clase}">${estado.label}</span>
+                            <select class="estado-select" data-id="${escapeHtml(r.id)}">${opciones}</select>
+                        </td>
+                        ${acciones}`;
+                    tr.querySelector('.estado-select').value = r.review_status;
+                    tbody.appendChild(tr);
+                });
+            }
+
+            // Controles de paginación
+            document.getElementById("pag-info").textContent = `Página ${paginaActual} de ${totalPaginas}`;
+            document.getElementById("pag-prev").disabled = paginaActual <= 1;
+            document.getElementById("pag-next").disabled = paginaActual >= totalPaginas;
+
+            actualizarIndicadoresOrden();
+        }
+
+        function actualizarIndicadoresOrden() {
+            document.querySelectorAll("th[data-sort]").forEach(th => {
+                const flecha = th.querySelector('.flecha');
+                if (th.dataset.sort === sortColumn) {
+                    flecha.textContent = sortDir === 'asc' ? ' ▲' : ' ▼';
+                } else {
+                    flecha.textContent = '';
                 }
             });
         }
 
-        // Función para descargar como TXT
-        function descargarTXT() {
-            if (datosFiltrados.length === 0) {
-                alert('No hay datos para descargar');
-                return;
+        function mostrarCargando(activo) {
+            document.getElementById("cargando").style.display = activo ? 'flex' : 'none';
+            document.getElementById("tabla-wrap").style.display = activo ? 'none' : 'block';
+        }
+
+        // --- Acciones sobre registros ---
+        async function cambiarEstado(id, nuevoEstado) {
+            const registro = registrosActuales.find(r => r.id === id);
+            const anterior = registro ? registro.review_status : ESTADO_DEFECTO;
+            if (registro) registro.review_status = nuevoEstado; // optimista
+            aplicarVista();
+            try {
+                await updateDoc(doc(db, colection_registrations, id), { review_status: nuevoEstado });
+            } catch (error) {
+                if (registro) registro.review_status = anterior; // revertir
+                aplicarVista();
+                alert('Error al actualizar el estado: ' + error.message);
             }
-            let contenido = 'Email\tFecha de Ingreso\tIntentos\tFormulario Postulado\n';
-            datosFiltrados.forEach(d => {
-                contenido += `${d.email}\t${d.timestamp}\t${d.attempts}\t${d.form_title}\n`;
+        }
+
+        async function eliminarRegistro(id) {
+            if (!confirm('¿Está seguro de que desea eliminar este registro?')) return;
+            try {
+                await deleteDoc(doc(db, colection_registrations, id));
+                registrosActuales = registrosActuales.filter(r => r.id !== id);
+                aplicarVista();
+            } catch (error) {
+                alert('Error al eliminar el registro: ' + error.message);
+            }
+        }
+
+        // --- Exportación (respeta los filtros activos = vistaActual) ---
+        function descargarTXT() {
+            if (vistaActual.length === 0) { alert('No hay datos para descargar'); return; }
+            let contenido = 'Email\tFecha de Ingreso\tIntentos\tFormulario Postulado\tEstado\n';
+            vistaActual.forEach(d => {
+                contenido += `${d.email}\t${formatFecha(d.timestamp)}\t${d.attempts}\t${d.form_title}\t${ESTADOS[d.review_status].label}\n`;
             });
             const blob = new Blob([contenido], { type: 'text/plain;charset=utf-8' });
             const url = URL.createObjectURL(blob);
@@ -120,17 +311,14 @@
             URL.revokeObjectURL(url);
         }
 
-        // Función para descargar como XLSX
         function descargarXLSX() {
-            if (datosFiltrados.length === 0) {
-                alert('No hay datos para descargar');
-                return;
-            }
-            const datosExcel = datosFiltrados.map(d => ({
+            if (vistaActual.length === 0) { alert('No hay datos para descargar'); return; }
+            const datosExcel = vistaActual.map(d => ({
                 'Email': d.email,
-                'Fecha de Ingreso': d.timestamp,
+                'Fecha de Ingreso': formatFecha(d.timestamp),
                 'Intentos': d.attempts,
-                'Formulario Postulado': d.form_title
+                'Formulario Postulado': d.form_title,
+                'Estado': ESTADOS[d.review_status].label
             }));
             const ws = XLSX.utils.json_to_sheet(datosExcel);
             const wb = XLSX.utils.book_new();
@@ -138,130 +326,349 @@
             XLSX.writeFile(wb, 'registros_filtrados.xlsx');
         }
 
-        // Función para eliminar registro
-        async function eliminarRegistro(id) {
-            if (confirm('¿Está seguro de que desea eliminar este registro?')) {
-                try {
-                    await deleteDoc(doc(db, colection_registrations, id));
-                    listarRegistros(); // Recargar la tabla
-                } catch (error) {
-                    alert('Error al eliminar el registro: ' + error.message);
-                }
-            }
-        }
-
-        // Exponer funciones globalmente
-        window.descargarTXT = descargarTXT;
-        window.descargarXLSX = descargarXLSX;
-        window.eliminarRegistro = eliminarRegistro;
-
+        // --- Inicialización y listeners ---
         window.onload = async () => {
-            await cargarConfiguracion(); // Cargar flag desde DB primero
+            mostrarCargando(true);
+            await cargarConfiguracion();
             await cargarFormularios();
-            listarRegistros();
-            document.getElementById("form-select").addEventListener("change", listarRegistros);
+            await cargarRegistros();
+
+            // Filtro por formulario => nueva consulta a Firestore
+            document.getElementById("form-select").addEventListener("change", cargarRegistros);
+
+            // Búsqueda y filtro de estado => solo re-render en cliente
+            document.getElementById("buscar").addEventListener("input", debounce(() => {
+                paginaActual = 1; aplicarVista();
+            }, 200));
+            document.getElementById("estado-select").addEventListener("change", () => {
+                paginaActual = 1; aplicarVista();
+            });
+
+            // Botones de descarga
+            document.getElementById("btn-txt").addEventListener("click", descargarTXT);
+            document.getElementById("btn-xlsx").addEventListener("click", descargarXLSX);
+
+            // Ordenamiento por encabezados
+            document.querySelectorAll("th[data-sort]").forEach(th => {
+                th.addEventListener("click", () => {
+                    const col = th.dataset.sort;
+                    if (sortColumn === col) {
+                        sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        sortColumn = col;
+                        sortDir = 'asc';
+                    }
+                    aplicarVista();
+                });
+            });
+
+            // Paginación
+            document.getElementById("pag-prev").addEventListener("click", () => {
+                if (paginaActual > 1) { paginaActual--; renderTabla(); }
+            });
+            document.getElementById("pag-next").addEventListener("click", () => {
+                const totalPaginas = Math.max(1, Math.ceil(vistaActual.length / TAM_PAGINA));
+                if (paginaActual < totalPaginas) { paginaActual++; renderTabla(); }
+            });
+
+            // Delegación de eventos en la tabla (cambiar estado / eliminar)
+            document.getElementById("table-body").addEventListener("change", (e) => {
+                if (e.target.classList.contains("estado-select")) {
+                    cambiarEstado(e.target.dataset.id, e.target.value);
+                }
+            });
+            document.getElementById("table-body").addEventListener("click", (e) => {
+                if (e.target.classList.contains("btn-eliminar")) {
+                    eliminarRegistro(e.target.dataset.id);
+                }
+            });
         };
     </script>
     <style>
+        :root {
+            --primario: #3b82f6;
+            --primario-osc: #2563eb;
+            --gris-bg: #f1f5f9;
+            --texto: #1e293b;
+            --borde: #e2e8f0;
+        }
+
+        * { box-sizing: border-box; }
+
         body {
-            font-family: Arial, sans-serif;
+            font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+            color: var(--texto);
+            background: var(--gris-bg);
+            margin: 0;
+            padding: 24px 16px;
+        }
+
+        h1 {
             text-align: center;
+            font-size: 24px;
+            margin: 0 0 20px;
+        }
+
+        .panel {
+            max-width: 1100px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, .08), 0 4px 12px rgba(0, 0, 0, .04);
             padding: 20px;
         }
+
+        .toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: flex-end;
+            margin-bottom: 16px;
+        }
+
+        .campo {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .campo label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #64748b;
+        }
+
+        select, input[type="text"] {
+            padding: 9px 12px;
+            font-size: 14px;
+            border: 1px solid var(--borde);
+            border-radius: 8px;
+            background: #fff;
+            min-width: 180px;
+        }
+
+        input[type="text"]:focus, select:focus {
+            outline: none;
+            border-color: var(--primario);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, .15);
+        }
+
+        .toolbar .crece { flex: 1; }
+
+        .acciones-tool {
+            display: flex;
+            gap: 8px;
+            margin-left: auto;
+        }
+
+        .contador {
+            font-size: 13px;
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 8px;
+        }
+
+        .btn-descarga {
+            padding: 9px 16px;
+            font-size: 13px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            color: #fff;
+            transition: background-color .2s;
+        }
+
+        .btn-txt { background: #6b7280; }
+        .btn-txt:hover { background: #4b5563; }
+        .btn-xlsx { background: #10b981; }
+        .btn-xlsx:hover { background: #059669; }
+
+        .tabla-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--borde); }
 
         table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 20px;
+            font-size: 14px;
         }
 
         th, td {
-            border: 1px solid #ddd;
-            padding: 8px;
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--borde);
         }
 
-        th {
-            background-color: #3b82f6;
-            color: white;
+        thead th {
+            background: var(--primario);
+            color: #fff;
+            position: sticky;
+            top: 0;
+            white-space: nowrap;
         }
 
-        select {
-            padding: 8px;
-            margin-top: 10px;
-            font-size: 16px;
+        th[data-sort] { cursor: pointer; user-select: none; }
+        th[data-sort]:hover { background: var(--primario-osc); }
+
+        tbody tr:nth-child(even) { background: #f8fafc; }
+        tbody tr:hover { background: #eff6ff; }
+
+        .sin-datos { text-align: center; color: #94a3b8; padding: 24px; }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-right: 6px;
         }
 
-        .botones-descarga {
-            margin-top: 15px;
-            margin-bottom: 10px;
-        }
+        .badge-pendiente { background: #e2e8f0; color: #475569; }
+        .badge-revisado { background: #dbeafe; color: #1d4ed8; }
+        .badge-aceptado { background: #dcfce7; color: #15803d; }
+        .badge-rechazado { background: #fee2e2; color: #b91c1c; }
 
-        .btn-descarga {
-            padding: 10px 20px;
-            margin: 0 5px;
-            font-size: 14px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-        }
-
-        .btn-txt {
-            background-color: #6b7280;
-            color: white;
-        }
-
-        .btn-txt:hover {
-            background-color: #4b5563;
-        }
-
-        .btn-xlsx {
-            background-color: #10b981;
-            color: white;
-        }
-
-        .btn-xlsx:hover {
-            background-color: #059669;
-        }
+        .estado-select { min-width: 130px; padding: 4px 8px; font-size: 12px; }
 
         .btn-eliminar {
             padding: 6px 12px;
-            background-color: #ef4444;
-            color: white;
+            background: #ef4444;
+            color: #fff;
             border: none;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
             font-size: 13px;
-            transition: background-color 0.3s;
+            transition: background-color .2s;
+        }
+        .btn-eliminar:hover { background: #dc2626; }
+
+        .paginacion {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            margin-top: 14px;
         }
 
-        .btn-eliminar:hover {
-            background-color: #dc2626;
+        .paginacion button {
+            padding: 7px 14px;
+            border: 1px solid var(--borde);
+            background: #fff;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .paginacion button:disabled { opacity: .45; cursor: not-allowed; }
+        .paginacion button:not(:disabled):hover { background: var(--gris-bg); }
+        #pag-info { font-size: 13px; color: #64748b; }
+
+        #cargando {
+            display: none;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            padding: 48px;
+            color: #64748b;
+        }
+
+        .spinner {
+            width: 28px;
+            height: 28px;
+            border: 3px solid var(--borde);
+            border-top-color: var(--primario);
+            border-radius: 50%;
+            animation: girar .8s linear infinite;
+        }
+
+        @keyframes girar { to { transform: rotate(360deg); } }
+
+        /* Responsive: tabla en tarjetas en pantallas angostas */
+        @media (max-width: 640px) {
+            .toolbar { flex-direction: column; align-items: stretch; }
+            .acciones-tool { margin-left: 0; }
+            select, input[type="text"] { min-width: 0; width: 100%; }
+            .tabla-wrap { border: none; }
+            thead { display: none; }
+            table, tbody, tr, td { display: block; width: 100%; }
+            tbody tr {
+                margin-bottom: 12px;
+                border: 1px solid var(--borde);
+                border-radius: 10px;
+                overflow: hidden;
+                background: #fff !important;
+            }
+            td {
+                display: flex;
+                justify-content: space-between;
+                gap: 12px;
+                border-bottom: 1px solid var(--borde);
+            }
+            td::before {
+                content: attr(data-label);
+                font-weight: 600;
+                color: #64748b;
+            }
         }
     </style>
 </head>
 
 <body>
     <h1>Lista de Registros de Postulantes</h1>
-    <label for="form-select">Filtrar por formulario:</label>
-    <select id="form-select"></select>
 
-    <div class="botones-descarga">
-        <button onclick="descargarTXT()" class="btn-descarga btn-txt">Descargar TXT</button>
-        <button onclick="descargarXLSX()" class="btn-descarga btn-xlsx">Descargar Excel</button>
+    <div class="panel">
+        <div class="toolbar">
+            <div class="campo">
+                <label for="form-select">Formulario</label>
+                <select id="form-select"></select>
+            </div>
+            <div class="campo">
+                <label for="estado-select">Estado</label>
+                <select id="estado-select">
+                    <option value="">Todos los estados</option>
+                    <option value="pendiente">Pendiente</option>
+                    <option value="revisado">Revisado</option>
+                    <option value="aceptado">Aceptado</option>
+                    <option value="rechazado">Rechazado</option>
+                </select>
+            </div>
+            <div class="campo crece">
+                <label for="buscar">Buscar por email</label>
+                <input type="text" id="buscar" placeholder="ej. juan@correo.com" autocomplete="off">
+            </div>
+            <div class="acciones-tool">
+                <button id="btn-txt" class="btn-descarga btn-txt">Descargar TXT</button>
+                <button id="btn-xlsx" class="btn-descarga btn-xlsx">Descargar Excel</button>
+            </div>
+        </div>
+
+        <div class="contador" id="contador">0 postulantes</div>
+
+        <div id="cargando">
+            <div class="spinner"></div>
+            <span>Cargando registros…</span>
+        </div>
+
+        <div id="tabla-wrap" class="tabla-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th data-sort="email">Email<span class="flecha"></span></th>
+                        <th data-sort="timestamp">Fecha de Ingreso<span class="flecha"></span></th>
+                        <th data-sort="attempts">Intentos<span class="flecha"></span></th>
+                        <th data-sort="form_title">Formulario Postulado<span class="flecha"></span></th>
+                        <th data-sort="review_status">Estado<span class="flecha"></span></th>
+                        <th id="th-acciones">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody id="table-body"></tbody>
+            </table>
+        </div>
+
+        <div class="paginacion">
+            <button id="pag-prev">‹ Anterior</button>
+            <span id="pag-info">Página 1 de 1</span>
+            <button id="pag-next">Siguiente ›</button>
+        </div>
     </div>
-    <table>
-        <thead>
-            <tr>
-                <th>Email</th>
-                <th>Fecha de Ingreso</th>
-                <th>Intentos</th>
-                <th>Formulario Postulado</th>
-                <th id="th-acciones">Acciones</th>
-            </tr>
-        </thead>
-        <tbody id="table-body"></tbody>
-    </table>
 </body>
 
 </html>
