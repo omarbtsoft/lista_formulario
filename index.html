@@ -71,8 +71,9 @@
                 return new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
             }
             const texto = String(timestamp).trim();
-            // Formato dd/mm/aaaa [hh:mm[:ss]] (new Date lo interpretaría como mm/dd)
-            const m = texto.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+            // Formato dd/mm/aaaa[,] [hh:mm[:ss]] (new Date lo interpretaría como mm/dd)
+            // El separador entre fecha y hora puede ser coma, espacio o "T" (ej. "4/6/2026, 7:47:21")
+            const m = texto.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[,\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
             if (m) {
                 const [, dd, mm, aaaa, hh = '0', min = '0', ss = '0'] = m;
                 return new Date(+aaaa, +mm - 1, +dd, +hh, +min, +ss);
