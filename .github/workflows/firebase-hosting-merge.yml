@@ -14,4 +14,4 @@ jobs:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
           firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_REGISTRO_FORMULARIO_FCABF }}
           channelId: live
-          projectId: registro-formulario-fcabf
+          projectId: registration-list-form
